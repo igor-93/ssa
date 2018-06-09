@@ -11,4 +11,4 @@ Main differences:
 Paper for multi-scale SSA:
 Yiou, Pascal & Sornette, Didier & D Accepted, Physica. (2000). Data-Adaptive Wavelets and Multi-Scale SSA. 
 
-
+I will add the code after I finish my master thesis.
