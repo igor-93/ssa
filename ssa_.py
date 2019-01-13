@@ -302,59 +302,7 @@ def ssa(time_series, embedding_dimension=None, n_components=2, verbose=True, plo
         return result, orthonormal_base[:, :n_components], get_reconstruction(*[Xs[i] for i in [add_component]], names=range(2), plot=False)
 
 
-def ms_ssa(ts, window_sizes=None, alpha=3, steps=None, return_bases=2, verbose=False):
-    """
-    Multi-scale singular-spectrum-analysis introduced by Yiou, Pascal & Sornette, Didier & D Accepted, Physica. (2000).
-    Data-Adaptive Wavelets and Multi-Scale SSA.
-    :param ts:
-    :param window_sizes: Different lengths of the moving window
-    :param alpha: factor used to calculate the lag for each window size. Paper suggests 3.
-    :param steps: steps[i] is number of steps to skip when moving window os size window_sizes[i].
-    :param return_bases: 2 means it returns set of EOF-2 vectors
-    :return:
-    """
 
-    n = len(ts)
-    if window_sizes is None:
-        window_sizes = np.array([30, 60, 120, 240])
-        window_sizes = window_sizes[window_sizes <= n]
-        print('MS-SSA picked the windows of size ', window_sizes)
-    if steps is None:
-        steps = np.array([10 * (2**i) for i in range(len(window_sizes))])
-        print('MS-SSA picked the steps for the window sizes ', steps)
-
-    #window_sizes = window_sizes[1:]
-    #steps = steps[1:]
-
-    if verbose:
-        print('window_sizes: ', window_sizes)
-        print('steps: ', steps)
-
-    if len(window_sizes) != len(steps):
-        raise ValueError('{} != {}'.format(len(window_sizes), len(steps)))
-
-    bases_set = []
-
-    for iw, w in enumerate(window_sizes):
-        step_size = steps[iw]
-        win_starts = range(0, n, step_size)
-        m = int(w / alpha)
-        for start in win_starts:
-            end = start + w
-            if end > n:
-                break
-            if verbose:
-                print('start:end = {}:{}'.format(start, end))
-            window = ts[start:end]
-
-            reconstructed, bases = ssa(window, embedding_dimension=m, n_components=3, verbose=verbose, plot=False)
-            bases_set.append(bases[:, return_bases])
-
-        # start = int(n / 2 - w / 2)
-        # end = start + w
-        # window = ts[start:end]
-        # reconstructed = ssa(window, embedding_dimension=m, n_components=3, verbose=True, plot=True)
-    return bases_set
 
 
 if __name__ == '__main__':
