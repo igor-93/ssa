@@ -1,12 +1,58 @@
-# https://github.com/aj-cloete/pySSA
 import sys
+import warnings
+from time import time
 import numpy as np
 import pandas as pd
 from scipy import linalg
 
 import matplotlib.pylab as plt
+from sklearn.utils.extmath import randomized_svd
 
-plt.rcParams['figure.figsize'] = 11, 4
+
+__all__ = ['SSA', 'ssa']
+
+
+class SSA(object):
+
+    def __init__(self, lag, n_components, return_eofs=False):
+        self.lag = lag
+        self.n_components = n_components
+        self.return_eofs = return_eofs
+
+    def fit(self):
+        return self
+
+    def transform(self, time_series):
+        res = ssa(time_series, lag=self.lag, n_components=self.n_components,
+                  return_eofs=self.return_eofs, verbose=False)
+        return res
+
+
+def validate_lag(n, lag):
+    if lag >= n:
+        raise ValueError('lag {} is bigger than time series length {}.'.format(lag, n))
+    elif lag > n // 2:
+        lag = n // 2
+        warnings.warn(
+            'Lag is bigger than half of the time-series length, it will be set to {}'.format(lag), RuntimeWarning)
+    elif lag < 2:
+        raise ValueError('Lag {} is too small'.format(lag))
+    return lag
+
+
+def validate_input(time_series):
+    if not isinstance(time_series, np.ndarray):
+        if isinstance(time_series, pd.Series):
+            time_series = time_series.values
+        else:
+            time_series = np.array(time_series)
+
+    time_series = np.squeeze(time_series)
+
+    if time_series.ndim > 1:
+        raise ValueError('Time series must be 1-D, but it has shape: ', time_series.shape)
+
+    return time_series
 
 
 def _printer(name, *args):
@@ -43,19 +89,6 @@ def view_s_contributions(s_contributions, adjust_scale=False, cumulative=False):
     ax.set_yticklabels(['{:3.0f}%'.format(x * 100) for x in vals])
 
 
-def view_time_series(time_series, show=False):
-    """
-    Plot the input time series.
-    :param time_series:
-    :return:
-    """
-    plt.figure()
-    plt.plot(time_series)
-    plt.title('Original Time Series')
-    if show:
-        plt.show()
-
-
 def embed(time_series, embedding_dimension=None, verbose=False):
     """
     Embed the time series with embedding_dimension window size.
@@ -74,7 +107,6 @@ def embed(time_series, embedding_dimension=None, verbose=False):
     if np.isnan(X).any():
         raise ValueError('NaN must not appear in the lag correlation matrix if there are no NaNs in the input '
                          'time series.')
-    X = np.matrix(X)
 
     if verbose:
         print('L-trajectory matrix (L x K)\t: {}'.format(X.shape))
@@ -82,7 +114,7 @@ def embed(time_series, embedding_dimension=None, verbose=False):
     return X
 
 
-def decompose(X, verbose=False, plot_eigenvalues=False):
+def decompose(X, n_components, return_eofs=False, verbose=False, plot_eigenvalues=False):
     """
     Performs the Singular Value Decomposition and identifies the rank of the embedding subspace
     Characteristic of projection: the proportion of variance captured in the subspace.
@@ -95,13 +127,13 @@ def decompose(X, verbose=False, plot_eigenvalues=False):
                      It's index might miss some values, i.e. for contributions smaller then 1.
     orthonormal_base:  U[:, :num_contribs], where num_contribs is number of positive contributions
     """
-    # Build lag-correlation matrix (C in paper)
-    S = X * X.T
-
     # Run SVD
-    U, lambdas, V = linalg.svd(S)
-    U, s, V = np.matrix(U), np.sqrt(lambdas), np.matrix(V)
-    d = np.linalg.matrix_rank(X)
+    U, lambdas, V = randomized_svd(X, n_components=n_components)
+
+    if n_components is None:
+        d = np.linalg.matrix_rank(X)
+    else:
+        d = len(lambdas)
 
     if plot_eigenvalues:
         plt.scatter(range(len(s)), s)
@@ -109,23 +141,18 @@ def decompose(X, verbose=False, plot_eigenvalues=False):
         plt.ylabel('Eigenvalues')
         plt.xlabel('Index of Eigenvalues')
 
-
-    Xs = np.zeros((d, X.shape[0], X.shape[1]))
-    for i in range(d):
-        V_i = X.T * (U[:, i] / s[i])
-        Xs[i, :, :] = s[i] * U[:, i] * np.matrix(V_i).T
-
-    # Get contributions of elementary matrices
-    s_contributions = get_contributions(X, s, False)
-    num_contribs = len(s_contributions)
-    r_characteristic = round((s[:num_contribs] ** 2).sum() / (s ** 2).sum(), 4)
-    #orthonormal_base = U[:, :num_contribs] #{i: U[:, i] for i in range(num_contribs)}
+    Ud = U[:, :n_components]
+    Vd = V[:n_components, :]
+    Xs = lambdas[:n_components, None, None] * np.einsum("ik,kj->kij", Ud, Vd)
 
     if not np.all(lambdas > 0):
         raise AssertionError(lambdas)
-    orthonormal_base = U
 
     if verbose:
+        # Get contributions of elementary matrices
+        s_contributions = get_contributions(X, s, False)
+        num_contribs = len(s_contributions)
+        r_characteristic = round((s[:num_contribs] ** 2).sum() / (s ** 2).sum(), 4)
         msg1 = 'Rank of trajectory\t\t: {}'.format(d)
         msg2 = 'Dimension of projection space (num_contribs)\t: {}'.format(num_contribs)
         msg3 = 'Characteristic of projection\t: {}'.format(r_characteristic)
@@ -135,10 +162,13 @@ def decompose(X, verbose=False, plot_eigenvalues=False):
         else:
             _printer('DECOMPOSITION SUMMARY', msg2, msg3)
 
-    return Xs, s_contributions, orthonormal_base
+    if return_eofs:
+        return Xs, U
+    else:
+        return Xs
 
 
-def get_reconstruction(*hankel, names=None, plot=True, symmetric_plots=False):
+def get_reconstruction(*hankel, names=None, plot=False, symmetric_plots=False):
     """
     Visualise the reconstruction of the hankel matrix/matrices passed to *hankel
     :param hankel: elementary matrices that are going to be summed to get a hankel matrix used for reconstruction
@@ -148,19 +178,21 @@ def get_reconstruction(*hankel, names=None, plot=True, symmetric_plots=False):
     :return:
     """
     hankel_mat = None
-    for han in hankel:
-        if isinstance(hankel_mat, np.matrix):
-            hankel_mat = hankel_mat + han
+    for i, han in enumerate(hankel):
+        if i == 0:
+            hankel_mat = han
         else:
-            hankel_mat = np.matrix(han)
+            hankel_mat = hankel_mat + han
+
     reconstructed_ts = diagonal_averaging(hankel_mat)
-    title = 'Reconstruction of signal'
-    if names or names == 0:
-        if isinstance(names, range):
-            names = list(names)
-        title += ' associated with singular value{}: {}'
-        title = title.format('' if len(str(names)) == 1 else 's', names)
+
     if plot:
+        title = 'Reconstruction of signal'
+        if names or names == 0:
+            if isinstance(names, range):
+                names = list(names)
+            title += ' associated with singular value{}: {}'
+            title = title.format('' if len(str(names)) == 1 else 's', names)
         plt.figure()
         plt.plot(reconstructed_ts)
         plt.title(title)
@@ -171,7 +203,7 @@ def get_reconstruction(*hankel, names=None, plot=True, symmetric_plots=False):
     return reconstructed_ts
 
 
-def get_contributions(X, s, plot=True):
+def get_contributions(X, s, plot=False):
     """
     Calculate the relative contribution of each of the singular values
     :param X: Trajectory matrix of shape L * K that contains lagged copies of the time series
@@ -201,118 +233,57 @@ def diagonal_averaging(hankel_matrix):
     :param hankel_matrix:
     :return: reconstructed series
     """
-    mat = np.matrix(hankel_matrix)
-    L, K = mat.shape
-    L_star, K_star = min(L, K), max(L, K)
-    if L > K:
-        mat = mat.T
-    ret = []
+    L, K = hankel_matrix.shape
 
-    # Diagonal Averaging
-    for k in range(1 - K_star, L_star):
-        mask = np.eye(K_star, k=k, dtype='bool')[::-1][:L_star, :]
-        mask_n = sum(sum(mask))
-        ma = np.ma.masked_array(mat.A, mask=1 - mask)
-        ret += [ma.sum() / mask_n]
-
-    return np.array(ret)
+    flipped = hankel_matrix[::-1, :]
+    divisors = np.concatenate((np.arange(1, L), [L] * (K - L), np.arange(L, 0, -1)))
+    x1d = np.array([np.trace(flipped, i) for i in range(-L + 1, K)])
+    x1d = x1d / divisors
+    return x1d
 
 
-def generate_price(T, log_prices=True):
-    ts = range(0, T)
-    np.random.seed(None)
-    rands = np.random.randn(T)
-    Ws = [np.sum(rands[:t]) / np.sqrt(T) for t in ts]
-    sig = np.exp(Ws)
-    ys = sig * (np.random.choice(100) + 1)
-    if log_prices:
-        ys = np.log(ys)
-    return ys
+def ssa(time_series, lag, n_components, return_eofs=False, verbose=False):
+    """Function to run Singular Spectrum Analysis
 
+    Parameters
+    ----------
+    time_series : array-like
+        1D array or pd.Series input to run SSA on.
+    lag : int
+        lag a.k.a. embedding dimension. Maximum should be half the length of input time series
+    n_components : int
+        number of components to use when reconstructing the time series
+    return_eofs : bool, optional
+        if True, the function also returns EOFs. Default False.
+    verbose : bool
+        if True, print some messages during execution of the algorithm
 
-def ssa(time_series, embedding_dimension=None, n_components=2, verbose=True, plot=False, add_component=None):
+    Returns
+    -------
+    result: ndarray
+        reconstruction of the input time series
+
     """
-    Main function to run Singular-Spectrum-Analysis
-    :param time_series:
-    :param embedding_dimension:
-    :param n_components:
-    :param verbose:
-    :param plot:
-    :return:
-    """
-    if not isinstance(time_series, np.ndarray):
-        if isinstance(time_series, pd.Series):
-            time_series = time_series.values
-        else:
-            time_series = np.array(time_series)
-
-    if time_series.ndim > 1 and time_series.shape[1] > 1:
-        raise ValueError('Time series must be 1-D, but it has shape: ', time_series.shape)
-
-    if not embedding_dimension:
-        embedding_dimension = 2 * int(np.sqrt(len(time_series)))
-        print('embedding_dimension is automatically set to ', embedding_dimension)
+    time_series = validate_input(time_series)
+    n = len(time_series)
+    lag = validate_lag(n, lag)
 
     # Get trajectory matrix
-    X = embed(time_series, embedding_dimension=embedding_dimension, verbose=verbose)
+    X = embed(time_series, embedding_dimension=lag, verbose=verbose)
 
     # Run SVD and get elementary matrices and orthonormal bases
-    Xs, s_contributions, orthonormal_base = decompose(X, verbose=verbose, plot_eigenvalues=plot)
-
-    if plot:
-        view_s_contributions(s_contributions, adjust_scale=True)
-
-    # Components of the Signals
-    plot_components = False
-    if plot_components and plot:
-        plt.rcParams['figure.figsize'] = 11, 2
-        for i in range(3):
-            get_reconstruction(Xs[i], names=i, symmetric_plots=i != 0)
-        plt.rcParams['figure.figsize'] = 11, 4
-
-    result = get_reconstruction(*[Xs[i] for i in range(n_components)], names=range(n_components), plot=False)
-
-    if plot:
-        # plot EOFs
-        plt.figure()
-        plt.plot(orthonormal_base[:, 0], label='EOF 0')
-        plt.plot(orthonormal_base[:, 1], label='EOF 1')
-        plt.plot(orthonormal_base[:, 2], label='EOF 2')
-        plt.legend()
-        plt.title('EOFs')
-
-        # plot reconstructed signal
-        rec1 = get_reconstruction(*[Xs[i] for i in range(1)], names=range(2), plot=False)
-        rec2 = get_reconstruction(*[Xs[i] for i in range(2)], names=range(2), plot=False)
-        plt.figure()
-        plt.plot(time_series, label='Original')
-        plt.plot(rec1, label='From 1 component')
-        plt.plot(rec2, label='From 2 components')
-        if n_components not in [1,2]:
-            plt.plot(result, label='Reconstruction from {} components'.format(n_components))
-        plt.legend()
-        #plt.xlabel('Time (Months)')
-        #plt.ylabel('# Passengers (000)')
-        plt.title('Reconstructed signal')
-        # plt.show()
-
-    if add_component is None:
-        return result, orthonormal_base[:, :n_components]
+    res = decompose(X, n_components=n_components, return_eofs=return_eofs, verbose=verbose)
+    if return_eofs:
+        Xs, U = res
     else:
-        return result, orthonormal_base[:, :n_components], get_reconstruction(*[Xs[i] for i in [add_component]], names=range(2), plot=False)
+        Xs = res
+
+    result = get_reconstruction(*[Xs[i] for i in range(n_components)])
+
+    if return_eofs:
+        return result, U
+    else:
+        return result
 
 
-
-
-
-if __name__ == '__main__':
-
-    # Construct the data with gaps
-    #ts = pd.read_csv('air_passengers.csv', parse_dates=True, index_col='Month')
-    random_ts = generate_price(240)
-
-    embedding_dim = 3 * int(np.sqrt(len(random_ts)))
-    #res = ssa(ts, embedding_dimension=embedding_dim, n_components=5, verbose=True, plot=True)
-
-    ms_ssa(random_ts)
 

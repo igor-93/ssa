@@ -1,20 +1,89 @@
 import numpy as np
+import pandas as pd
 from joblib import Parallel, delayed
 
-from .ssa_ import *
+from .ssa_ import ssa, SSA
+
+
+__all__ = ['sliding_ssa', 'overlap_ssa', 'ms_ssa']
+
+
+def sliding_ssa(ts, lag, n_components, window_size, step=None, window_ends=None):
+    """Rolling Singular Spectrum Analysis.
+
+    Parameters
+    ----------
+    ts : pd.Series or DataFrame
+        Time-series with DatetimeIndex
+    window_ends : list of DateTime, optional
+        Time-intervals
+    window_size : int
+        Size of the windows for rolling SSA.
+    step : int, optional
+        Size of the step to skip when rolling the SSA window. Alternative to specifying
+        window_ends.
+    lag : int
+        lag a.k.a. embedding dimension. Maximum should be half the length of input time series
+    n_components : int
+        number of components to use when reconstructing the time series
+
+    Returns
+    -------
+    out_series : pd.Series
+        The Series objects have a right-labeled timestamp index, where each row contains
+        the reconstructed time-series from window_series
+        For given index t, it holds a time series reconstructed from the 1st eigenvalue up to and including t.
+        I.e. it is a Series of lists.
+    """
+    if window_ends is None:
+        if step is None:
+            step = 1
+        window_ends = ts.index[window_size::step]
+
+    # Start looping through the SSAs
+    model = SSA(lag, n_components)
+    ssa_results = []
+    for window_end in window_ends:
+        assert window_end in ts.index, "Window end %s not present in ts index" % (window_end)
+
+        window_end_idx = ts.index.get_loc(window_end)
+        window_start_idx = window_end_idx - window_size # (+1)???
+        if window_start_idx < 0:
+            raise ValueError("The lowest window end must be > index start + window size.")
+        window_ts = ts.iloc[window_start_idx:window_end_idx]
+        assert len(window_ts) == window_size
+
+        # window_ssa is the reconstructed time-series.
+        window_ssa = model.transform(window_ts)
+        ssa_results.append(window_ssa)
+
+    out_series = pd.Series(ssa_results, index=window_ends)
+    return out_series
 
 
 def overlap_ssa(ts, n_windows, embedding_dimension=None, n_components=2,  big_window_ratio=3, n_jobs=1):
-    """
-    Overlap-ssa from paper: (2018) A new algorithm in singular spectrum analysis framework:The Overlap-SSA (ov-SSA),
+    """Overlap-ssa from paper: (2018) A new algorithm in singular spectrum analysis framework:The Overlap-SSA (ov-SSA),
     M.C.R. Leles, J.P.H. Sansão, L.A. Mozelli, H.N. Guimarães,
-    :param ts:
-    :param n_windows:
-    :param embedding_dimension:
-    :param n_components:
-    :param big_window_ratio:
-    :param n_jobs:
-    :return:
+
+    Parameters
+    ----------
+    ts : pd.Series
+        input time series
+    n_windows : int
+        number of windows that will overlap
+    embedding_dimension : int, optional
+        lag used in SSA. Default: see SSA implementation
+    n_components : int, optional
+        number of components obtained from SSA to reconstruct the original ts
+    big_window_ratio : float, optional
+        how much bigger should the big window be bigger than the small one
+    n_jobs : int, optionl
+        number of parallel jobs
+
+    Returns
+    -------
+    ts : pd.Series
+        reconstruction of the input ts
     """
     if isinstance(ts, pd.Series):
         idx = ts.index
@@ -40,7 +109,6 @@ def overlap_ssa(ts, n_windows, embedding_dimension=None, n_components=2,  big_wi
     #chunks = [np.arange(len(ts))[i:i + b_win_size] for i in range(0, n, b_win_size - m)]
 
     res = Parallel(n_jobs=n_jobs)(delayed(ssa)(ch, embedding_dimension, n_components, verbose=False) for ch in chunks)
-    res = [r[0] for r in res]
 
     final_ts = res[0][:2*s_win_size]
     for i in range(1, len(res)):
@@ -98,7 +166,7 @@ def ms_ssa(ts, window_sizes=None, alpha=3, steps=None, return_bases=2, verbose=F
                 print('start:end = {}:{}'.format(start, end))
             window = ts[start:end]
 
-            reconstructed, bases = ssa(window, embedding_dimension=m, n_components=3, verbose=verbose, plot=False)
+            reconstructed, bases = ssa(window, lag=m, n_components=3, return_eofs=True, verbose=verbose)
             bases_set.append(bases[:, return_bases])
 
         # start = int(n / 2 - w / 2)

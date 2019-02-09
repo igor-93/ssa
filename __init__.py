@@ -1,2 +1,2 @@
 from .ssa_ import *
-from .ssa_variants import *
+from .ssa_extensions import *
